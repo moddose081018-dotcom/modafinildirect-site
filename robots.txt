@@ -1,0 +1,22 @@
+# robots.txt for modafinildirect.com
+#
+# One wildcard group only. A crawler that matches a named group obeys ONLY
+# that group, so adding "User-agent: X / Allow: /" exempts X from every rule
+# below. Add a named group only when it needs DIFFERENT rules.
+
+# Bytespider (ByteDance): aggressive crawler, no referral value.
+User-agent: Bytespider
+Disallow: /
+
+User-agent: *
+Allow: /
+
+# Tracking-parameter duplicates
+Disallow: /*?utm_source=
+Disallow: /*?utm_medium=
+Disallow: /*?utm_campaign=
+Disallow: /*&utm_source=
+Disallow: /*&utm_medium=
+Disallow: /*&utm_campaign=
+
+Sitemap: https://modafinildirect.com/sitemap.xml
