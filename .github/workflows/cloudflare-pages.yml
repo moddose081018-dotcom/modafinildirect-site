@@ -27,6 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       commit_sha: ${{ steps.revision.outputs.commit_sha }}
+      deploy_enabled: ${{ steps.gate.outputs.deploy_enabled }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -43,6 +44,36 @@ jobs:
         id: revision
         shell: bash
         run: echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      # Reads the deploy gate once, normalised (case and whitespace), and says
+      # exactly what it found. A skipped deploy job gives no reason; this does.
+      # Only presence is reported for the secret, never its value.
+      - name: Evaluate the deploy gate
+        id: gate
+        shell: bash
+        env:
+          DEPLOY_FLAG: ${{ vars.CLOUDFLARE_DEPLOY_ENABLED }}
+          ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          HAS_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
+        run: |
+          flag="$(printf '%s' "$DEPLOY_FLAG" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+          case "$flag" in true|1|yes|on) enabled=true ;; *) enabled=false ;; esac
+          {
+            echo "## Deploy gate"
+            echo
+            echo "| setting | state |"
+            echo "|---|---|"
+            echo "| vars.CLOUDFLARE_DEPLOY_ENABLED | ${DEPLOY_FLAG:-(unset)} -> deploy_enabled=$enabled |"
+            echo "| vars.CLOUDFLARE_ACCOUNT_ID | $([ -n "$ACCOUNT_ID" ] && echo set || echo '(unset)') |"
+            echo "| secrets.CLOUDFLARE_API_TOKEN | $([ "$HAS_TOKEN" = true ] && echo set || echo '(unset)') |"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$enabled" = true ]; then
+            [ -n "$ACCOUNT_ID" ] || { echo "::error::CLOUDFLARE_DEPLOY_ENABLED is on but the CLOUDFLARE_ACCOUNT_ID repository variable is unset"; exit 1; }
+            [ "$HAS_TOKEN" = true ] || { echo "::error::CLOUDFLARE_DEPLOY_ENABLED is on but the CLOUDFLARE_API_TOKEN repository secret is unset"; exit 1; }
+          else
+            echo "::warning::Deploy gate is off (CLOUDFLARE_DEPLOY_ENABLED='${DEPLOY_FLAG}'). Build only; nothing will be deployed. Set the repository variable to true."
+          fi
+          echo "deploy_enabled=$enabled" >> "$GITHUB_OUTPUT"
 
       # `npm run check` builds, validates the artifact and ends with the
       # deterministic preflight gate. Both deploy jobs depend on this job, so
@@ -66,7 +97,7 @@ jobs:
   # variable. Until it is "true", a green run is a green BUILD, not a
   # deployment. See DEPLOYMENT.md.
   deploy-staging:
-    if: vars.CLOUDFLARE_DEPLOY_ENABLED == 'true'
+    if: needs.build.outputs.deploy_enabled == 'true'
     needs: build
     runs-on: ubuntu-latest
     environment:
@@ -100,7 +131,7 @@ jobs:
         run: node tools/smoke-test.js https://modafinildirect-staging.pages.dev preview "${{ needs.build.outputs.commit_sha }}"
 
   deploy-production:
-    if: vars.CLOUDFLARE_DEPLOY_ENABLED == 'true' && (github.event_name == 'push' || inputs.deploy_production)
+    if: needs.build.outputs.deploy_enabled == 'true' && (github.event_name == 'push' || inputs.deploy_production)
     needs: [build, deploy-staging]
     runs-on: ubuntu-latest
     environment:
