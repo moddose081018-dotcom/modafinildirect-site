@@ -27,7 +27,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       commit_sha: ${{ steps.revision.outputs.commit_sha }}
-      deploy_enabled: ${{ steps.gate.outputs.deploy_enabled }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -44,36 +43,6 @@ jobs:
         id: revision
         shell: bash
         run: echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-
-      # Reads the deploy gate once, normalised (case and whitespace), and says
-      # exactly what it found. A skipped deploy job gives no reason; this does.
-      # Only presence is reported for the secret, never its value.
-      - name: Evaluate the deploy gate
-        id: gate
-        shell: bash
-        env:
-          DEPLOY_FLAG: ${{ vars.CLOUDFLARE_DEPLOY_ENABLED }}
-          ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-          HAS_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
-        run: |
-          flag="$(printf '%s' "$DEPLOY_FLAG" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
-          case "$flag" in true|1|yes|on) enabled=true ;; *) enabled=false ;; esac
-          {
-            echo "## Deploy gate"
-            echo
-            echo "| setting | state |"
-            echo "|---|---|"
-            echo "| vars.CLOUDFLARE_DEPLOY_ENABLED | ${DEPLOY_FLAG:-(unset)} -> deploy_enabled=$enabled |"
-            echo "| vars.CLOUDFLARE_ACCOUNT_ID | $([ -n "$ACCOUNT_ID" ] && echo set || echo '(unset)') |"
-            echo "| secrets.CLOUDFLARE_API_TOKEN | $([ "$HAS_TOKEN" = true ] && echo set || echo '(unset)') |"
-          } | tee -a "$GITHUB_STEP_SUMMARY"
-          if [ "$enabled" = true ]; then
-            [ -n "$ACCOUNT_ID" ] || { echo "::error::CLOUDFLARE_DEPLOY_ENABLED is on but the CLOUDFLARE_ACCOUNT_ID repository variable is unset"; exit 1; }
-            [ "$HAS_TOKEN" = true ] || { echo "::error::CLOUDFLARE_DEPLOY_ENABLED is on but the CLOUDFLARE_API_TOKEN repository secret is unset"; exit 1; }
-          else
-            echo "::warning::Deploy gate is off (CLOUDFLARE_DEPLOY_ENABLED='${DEPLOY_FLAG}'). Build only; nothing will be deployed. Set the repository variable to true."
-          fi
-          echo "deploy_enabled=$enabled" >> "$GITHUB_OUTPUT"
 
       # `npm run check` builds, validates the artifact and ends with the
       # deterministic preflight gate. Both deploy jobs depend on this job, so
@@ -93,30 +62,66 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # Both deploy jobs are gated on the CLOUDFLARE_DEPLOY_ENABLED repository
-  # variable. Until it is "true", a green run is a green BUILD, not a
-  # deployment. See DEPLOYMENT.md.
+  # The deploy jobs always run so the gate can be read INSIDE the environment.
+  # GitHub resolves `vars.*` and `secrets.*` for a job only once it has entered
+  # its environment, so settings stored on the staging/production environments
+  # are invisible to a job-level `if` and to the build job. Each job therefore
+  # evaluates the gate as its first step and skips the rest when it is off.
+  # Repository-level settings work too; the environment ones take precedence.
   deploy-staging:
-    if: needs.build.outputs.deploy_enabled == 'true'
     needs: build
     runs-on: ubuntu-latest
     environment:
       name: staging
       url: https://modafinildirect-staging.pages.dev
+    outputs:
+      deploy_enabled: ${{ steps.gate.outputs.deploy_enabled }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Evaluate the deploy gate
+        id: gate
+        shell: bash
+        env:
+          DEPLOY_FLAG: ${{ vars.CLOUDFLARE_DEPLOY_ENABLED }}
+          ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          HAS_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
+        run: |
+          flag="$(printf '%s' "$DEPLOY_FLAG" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+          case "$flag" in true|1|yes|on) enabled=true ;; *) enabled=false ;; esac
+          {
+            echo "## Deploy gate (staging environment)"
+            echo
+            echo "| setting | state |"
+            echo "|---|---|"
+            echo "| CLOUDFLARE_DEPLOY_ENABLED | ${DEPLOY_FLAG:-(unset)} -> deploy_enabled=$enabled |"
+            echo "| CLOUDFLARE_ACCOUNT_ID | $([ -n "$ACCOUNT_ID" ] && echo set || echo '(unset)') |"
+            echo "| CLOUDFLARE_API_TOKEN | $([ "$HAS_TOKEN" = true ] && echo set || echo '(unset)') |"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$enabled" = true ]; then
+            [ -n "$ACCOUNT_ID" ] || { echo "::error::CLOUDFLARE_DEPLOY_ENABLED is on but CLOUDFLARE_ACCOUNT_ID is unset (repository variable or staging environment variable)"; exit 1; }
+            [ "$HAS_TOKEN" = true ] || { echo "::error::CLOUDFLARE_DEPLOY_ENABLED is on but CLOUDFLARE_API_TOKEN is unset (repository secret or staging environment secret)"; exit 1; }
+          else
+            echo "::warning::Deploy gate is off (CLOUDFLARE_DEPLOY_ENABLED='${DEPLOY_FLAG}'). Nothing deployed to staging. Set the variable to true at repository level or on the staging environment."
+          fi
+          echo "deploy_enabled=$enabled" >> "$GITHUB_OUTPUT"
+
+      - if: steps.gate.outputs.deploy_enabled == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.build.outputs.commit_sha }}
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - if: steps.gate.outputs.deploy_enabled == 'true'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: '22'
           cache: npm
-      - run: npm ci
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - if: steps.gate.outputs.deploy_enabled == 'true'
+        run: npm ci
+      - if: steps.gate.outputs.deploy_enabled == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: modafinildirect-public-${{ github.run_id }}
           path: dist
       - name: Deploy exact artifact to staging
+        if: steps.gate.outputs.deploy_enabled == 'true'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
@@ -128,29 +133,66 @@ jobs:
           --commit-hash "$COMMIT_SHA"
           --commit-message "GitHub Actions staging deployment"
       - name: Smoke test staging
+        if: steps.gate.outputs.deploy_enabled == 'true'
         run: node tools/smoke-test.js https://modafinildirect-staging.pages.dev preview "${{ needs.build.outputs.commit_sha }}"
 
   deploy-production:
-    if: needs.build.outputs.deploy_enabled == 'true' && (github.event_name == 'push' || inputs.deploy_production)
+    if: github.event_name == 'push' || inputs.deploy_production
     needs: [build, deploy-staging]
     runs-on: ubuntu-latest
     environment:
       name: production
       url: https://modafinildirect.com
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Evaluate the deploy gate
+        id: gate
+        shell: bash
+        env:
+          DEPLOY_FLAG: ${{ vars.CLOUDFLARE_DEPLOY_ENABLED }}
+          ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          HAS_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
+          STAGING_DEPLOYED: ${{ needs.deploy-staging.outputs.deploy_enabled }}
+        run: |
+          flag="$(printf '%s' "$DEPLOY_FLAG" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+          case "$flag" in true|1|yes|on) enabled=true ;; *) enabled=false ;; esac
+          {
+            echo "## Deploy gate (production environment)"
+            echo
+            echo "| setting | state |"
+            echo "|---|---|"
+            echo "| CLOUDFLARE_DEPLOY_ENABLED | ${DEPLOY_FLAG:-(unset)} -> deploy_enabled=$enabled |"
+            echo "| CLOUDFLARE_ACCOUNT_ID | $([ -n "$ACCOUNT_ID" ] && echo set || echo '(unset)') |"
+            echo "| CLOUDFLARE_API_TOKEN | $([ "$HAS_TOKEN" = true ] && echo set || echo '(unset)') |"
+            echo "| staging deployed first | ${STAGING_DEPLOYED:-false} |"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$enabled" = true ]; then
+            [ -n "$ACCOUNT_ID" ] || { echo "::error::CLOUDFLARE_DEPLOY_ENABLED is on but CLOUDFLARE_ACCOUNT_ID is unset (repository variable or production environment variable)"; exit 1; }
+            [ "$HAS_TOKEN" = true ] || { echo "::error::CLOUDFLARE_DEPLOY_ENABLED is on but CLOUDFLARE_API_TOKEN is unset (repository secret or production environment secret)"; exit 1; }
+            # Production only ever receives an artifact that staging has served and passed.
+            [ "$STAGING_DEPLOYED" = true ] || { echo "::error::Production is enabled but staging was not deployed in this run. Enable the gate for staging too."; exit 1; }
+          else
+            echo "::warning::Deploy gate is off (CLOUDFLARE_DEPLOY_ENABLED='${DEPLOY_FLAG}'). Nothing deployed to production."
+          fi
+          echo "deploy_enabled=$enabled" >> "$GITHUB_OUTPUT"
+
+      - if: steps.gate.outputs.deploy_enabled == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.build.outputs.commit_sha }}
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - if: steps.gate.outputs.deploy_enabled == 'true'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: '22'
           cache: npm
-      - run: npm ci
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - if: steps.gate.outputs.deploy_enabled == 'true'
+        run: npm ci
+      - if: steps.gate.outputs.deploy_enabled == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: modafinildirect-public-${{ github.run_id }}
           path: dist
       - name: Deploy the tested artifact to production
+        if: steps.gate.outputs.deploy_enabled == 'true'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
@@ -162,4 +204,5 @@ jobs:
           --commit-hash "$COMMIT_SHA"
           --commit-message "GitHub Actions production deployment"
       - name: Smoke test production
+        if: steps.gate.outputs.deploy_enabled == 'true'
         run: node tools/smoke-test.js https://modafinildirect.com production "${{ needs.build.outputs.commit_sha }}"

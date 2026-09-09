@@ -9,8 +9,14 @@ Pushes to `main` run `.github/workflows/cloudflare-pages.yml`:
 3. `deploy-production` deploys the same artifact to `modafinildirect-prod`
    and smoke-tests `https://modafinildirect.com`.
 
-Jobs 2 and 3 run only when the repository variable
-`CLOUDFLARE_DEPLOY_ENABLED` is `true`. This mirrors buymoda-site, where the
+Jobs 2 and 3 deploy only when the `CLOUDFLARE_DEPLOY_ENABLED` variable is
+`true`. Each deploy job reads it, together with the account ID variable and
+the API token secret, from inside its own GitHub environment, so the three
+settings may live either at repository level (Settings, Secrets and
+variables, Actions) or on the `staging` and `production` environments
+(Settings, Environments). Whichever you use, set all three in the same
+place; if you use environments, set them on both. Every run writes a
+"Deploy gate" table to the job summary saying exactly what it found. This mirrors buymoda-site, where the
 gate produced two false "the page is live" reports before anyone noticed
 that a green run had deployed nothing. Do not read a green tick as a
 deployment until the variable is set.
